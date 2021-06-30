@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-from typing import Sequence, Optional
+from typing import Sequence, Optional, Union
 
 import pandas as pd
 import numpy as np
@@ -24,23 +24,32 @@ class FindStartupShutdown(object):
         return self.transform(cems)
 
 
-def _find_blocks_of_zeros(ser: pd.Series) -> pd.DataFrame:
-    """summarize contiguous subsequences of zero values in a time series
+def _find_uptime(
+    ser: pd.Series, multiindex_key: Optional[Union[str, int]] = None, downtime: bool = False
+) -> pd.DataFrame:
+    """summarize contiguous subsequences of non-zero values in a generation time series
 
     Args:
         ser (pd.Series): pandas series with datetime index
+        multiindex_key (Optional[Union[str, int]], optional): if not None, assign new multiindex level to output. Used in manual groupby loops. Defaults to None.
+        downtime (bool, optional): rearrange output events to refer to downtime instead of uptime. Defaults to False.
 
     Raises:
         NotImplementedError: whens ser has multiindex
-        ValueError: when first value of ser is np.NaN
-        ValueError: when last value of ser is np.NaN
 
     Returns:
         pd.DataFrame: table of events, with shutdown and startup timestamps
     """
+    # TODO: all this multiindex stuff could be a separate wrapper function
     if isinstance(ser.index, pd.MultiIndex):
-        # needs groupby
-        raise NotImplementedError
+        if multiindex_key is None:
+            raise NotImplementedError(
+                "groupby functionality not yet implemented. Pass multiindex_key manually per group"
+            )
+        else:
+            names = ser.index.names
+            ser = ser.copy()
+            ser.index = ser.index.droplevel(0)  # for groupby
     # else single plant
 
     # binarize and find edges
@@ -56,31 +65,57 @@ def _find_blocks_of_zeros(ser: pd.Series) -> pd.DataFrame:
 
     generator_starts_with_zero = ser.iat[0] == 0
     generator_ends_with_zero = ser.iat[-1] == 0
-    if generator_starts_with_zero is np.nan:
-        raise ValueError(f"input series starts with NaN. Please impute before using this method.")
-    if generator_ends_with_zero is np.nan:
-        raise ValueError(f"input series ends with NaN. Please impute before using this method.")
 
     events = {}
     nan = pd.Series([pd.NaT]).dt.tz_localize("UTC")
 
-    # Zero blocks are defined as having a start and end.
-    # If the start (or end) of a block occurs outside the data
-    # period, it is marked with nan.
+    # Events (uptime or downtime) are defined as having a start and end.
+    # If the start (or end) of an event occurs outside the data
+    # period, it is marked with pd.NaT
 
     # NOTE: 'startup' refers to generators transitioning from
-    # zero power to positive power, but confusingly indicates
-    # the END of a block of zero power values. Vice versa for
-    # 'shutdown', which indicates the START of a zero block.
+    # zero power to positive power.
+    # For downtime=True, this can be confusing because
+    # 'startup' then indicates the END of a downtime event
+    # Vice versa for 'shutdown', which indicates
+    # the START of a downtime block.
 
-    if generator_starts_with_zero:  # first zero block has unknown shutdown time, known startup
-        events["shutdown"] = nan.append(pd.Series(shutdowns), ignore_index=True)
-    else:  # first zero block is fully defined
-        events["shutdown"] = shutdowns
+    # The difference between downtime=False and downtime=True
+    # is the shutdown timestamps are shifted 1 row,
+    # plus some NaT accounting on the ends,
+    # and the shutdown/startup column order is switched to
+    # reflect the opposite begin/end convention for the events
 
-    if generator_ends_with_zero:  # last zero block has known shutdown but unknown startup
-        events["startup"] = pd.Series(startups).append(nan, ignore_index=True)
-    else:  # last zero block is fully defined
-        events["startup"] = startups
+    if downtime:  # events table refers to downtime periods (blocks of zeros)
+        if (
+            generator_starts_with_zero
+        ):  # first downtime period has unknown shutdown time, known startup
+            events["shutdown"] = nan.append(pd.Series(shutdowns), ignore_index=True)
+        else:  # first downtime period is fully defined
+            events["shutdown"] = shutdowns
 
-    return pd.DataFrame(events)
+        if generator_ends_with_zero:  # last downtime period has known shutdown but unknown startup
+            events["startup"] = pd.Series(startups).append(nan, ignore_index=True)
+        else:  # last downtime period is fully defined
+            events["startup"] = startups
+
+    else:  # events table refers to uptime periods (blocks of non-zeros)
+        if generator_starts_with_zero:  # first uptime period is fully defined
+            events["startup"] = startups
+        else:  # first uptime period has unknown startup time, known shutdown
+            events["startup"] = nan.append(pd.Series(startups), ignore_index=True)
+
+        if generator_ends_with_zero:  # last uptime period is fully defined
+            events["shutdown"] = shutdowns
+        else:  # last uptime period has known startup but unknown shutdown
+            events["shutdown"] = pd.Series(shutdowns).append(nan, ignore_index=True)
+
+    if multiindex_key is None:
+        return pd.DataFrame(events)
+    else:
+        events = pd.DataFrame(events)
+        events.index = pd.MultiIndex.from_arrays(
+            [np.full(len(events), multiindex_key), np.arange(len(events))],
+            names=[names[0], "event"],
+        )
+        return events
