@@ -7,8 +7,12 @@ Outline of work and current progress:
 
 - [X] Plan analysis path and do initial exploration of ramp rates
 - [ ] Identify and select 'normal' plant operations
-- [ ] Idenfify maximum per-unit hourly load change
+  - [X] Identify startup and shutdown events
+  - [X] Analyze ramp rates vs proximity to startups/shutdowns
 - [ ] Check if hourly resolution is sufficient to calculate ramp rates
+  - [X] For peakers, check single-point spikes (unresolveable peaks).
+  - [ ] For 'baseload', check that ramp rates are smaller than operating band
+- [ ] Idenfify maximum per-unit hourly load change
 - [ ] Join EPA emissions units with EIA generation units
 - [ ] Anomaly detection and imputation
 - [ ] Ramp rate sensitivity analysis
