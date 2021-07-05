@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
-from typing import Sequence, Optional, Union
+from typing import Sequence, Optional, Union, Tuple
 
 import pandas as pd
 import numpy as np
+from pandas.core.series import Series
 
 
 class FindStartupShutdown(object):
@@ -119,3 +120,71 @@ def _find_uptime(
             names=[names[0], "event"],
         )
         return events
+
+
+def _binarize(ser: pd.Series):
+    """modularize this in case I want to do more smoothing later"""
+    return ser.gt(0).astype(np.int8)
+
+
+def _find_edges(cems: pd.DataFrame, drop_intermediates=True) -> pd.DataFrame:
+    """find timestamps of startups and shutdowns based on transition from zero to non-zero generation"""
+    cems["binarized"] = _binarize(cems["gross_load_mw"])
+    # for each unit, find change points from zero to non-zero production
+    # this could be done with groupby but it is much slower
+    # cems.groupby(level='unit_id_epa')['binarized_col'].transform(lambda x: x.diff())
+    cems["binary_diffs"] = (
+        cems["binarized"].diff().where(cems["unit_id_epa"].diff().eq(0))
+    )  # dont take diffs across units
+    cems["shutdowns"] = cems["operating_datetime_utc"].where(cems["binary_diffs"] == -1, pd.NaT)
+    cems["startups"] = cems["operating_datetime_utc"].where(cems["binary_diffs"] == 1, pd.NaT)
+    if drop_intermediates:
+        cems.drop(columns=["binarized", "binary_diffs"], inplace=True)
+    return cems
+
+
+def _distance_from_downtime(cems: pd.DataFrame, drop_intermediates=True) -> pd.DataFrame:
+    """calculate two columns: the number of hours to the next shutdown; and from the last startup"""
+    # fill startups forward and shutdowns backward
+    # Note that this leaves NaT values for any uptime periods at the very start/end of the timeseries
+    # Handling this is left for later analysis
+    cems["startups"] = cems.groupby(level="unit_id_epa")["startups"].transform(
+        lambda x: x.fillna(method="ffill")
+    )
+    cems["shutdowns"] = cems.groupby(level="unit_id_epa")["shutdowns"].transform(
+        lambda x: x.fillna(method="bfill")
+    )
+    cems["hours_from_startup"] = (
+        cems["operating_datetime_utc"]
+        .sub(cems["startups"])
+        .dt.total_seconds()
+        .div(3600)
+        .astype(np.float32)
+    )
+    # invert sign so distances are all positive
+    cems["hours_to_shutdown"] = (
+        cems["shutdowns"]
+        .sub(cems["operating_datetime_utc"])
+        .dt.total_seconds()
+        .div(3600)
+        .astype(np.float32)
+    )
+    if drop_intermediates:
+        cems.drop(columns=["startups", "shutdowns"], inplace=True)
+    return cems
+
+
+def calc_distance_from_downtime(cems: pd.DataFrame, drop_intermediates=True) -> pd.DataFrame:
+    """calculate two columns: the number of hours to the next shutdown; and from the last startup"""
+    cems = _find_edges(cems, drop_intermediates)
+    return _distance_from_downtime(cems, drop_intermediates)
+
+
+def calc_ramp_rates(cems: pd.DataFrame) -> pd.DataFrame:
+    """calculate ramp rates and normalized ramp factor"""
+
+    def inner(df):
+        diff = df.diff()
+        return pd.DataFrame([diff, diff.div(df.max())], columns=["ramp_rate", "ramp_factor"])
+
+    return cems.groupby(level="unit_id_epa")["gross_load_mw"].apply(inner)
