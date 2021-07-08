@@ -143,17 +143,25 @@ def _find_edges(cems: pd.DataFrame, drop_intermediates=True) -> pd.DataFrame:
     return cems
 
 
-def _distance_from_downtime(cems: pd.DataFrame, drop_intermediates=True) -> pd.DataFrame:
+def _distance_from_downtime(
+    cems: pd.DataFrame, drop_intermediates=True, boundary_offset_hours: int = 24
+) -> pd.DataFrame:
     """calculate two columns: the number of hours to the next shutdown; and from the last startup"""
     # fill startups forward and shutdowns backward
     # Note that this leaves NaT values for any uptime periods at the very start/end of the timeseries
-    # Handling this is left for later analysis
-    cems["startups"] = cems.groupby(level="unit_id_epa")["startups"].transform(
-        lambda x: x.fillna(method="ffill")
+    # The second fillna handles this by assuming the real boundary is the edge of the dataset + an offset
+    offset = pd.Timedelta(boundary_offset_hours, unit="h")
+    cems["startups"] = (
+        cems["startups"]
+        .groupby(level="unit_id_epa")
+        .transform(lambda x: x.ffill().fillna(x.index[0][1] - offset))
     )
-    cems["shutdowns"] = cems.groupby(level="unit_id_epa")["shutdowns"].transform(
-        lambda x: x.fillna(method="bfill")
+    cems["shutdowns"] = (
+        cems["shutdowns"]
+        .groupby(level="unit_id_epa")
+        .transform(lambda x: x.bfill().fillna(x.index[-1][1] + offset))
     )
+
     cems["hours_from_startup"] = (
         cems["operating_datetime_utc"]
         .sub(cems["startups"])
@@ -180,11 +188,26 @@ def calc_distance_from_downtime(cems: pd.DataFrame, drop_intermediates=True) -> 
     return _distance_from_downtime(cems, drop_intermediates)
 
 
-def calc_ramp_rates(cems: pd.DataFrame) -> pd.DataFrame:
-    """calculate ramp rates and normalized ramp factor"""
+def uptime_events(cems: pd.DataFrame, infer_boundaries=True) -> pd.DataFrame:
+    """convert timeseries of generation to a table of uptime events"""
+    units = cems.groupby(level="unit_id_epa")
+    event_dfs = []
+    for grp, df in units["gross_load_mw"]:
+        event_dfs.append(_find_uptime(df, multiindex_key=grp))
+    events = pd.concat(event_dfs)
 
-    def inner(df):
-        diff = df.diff()
-        return pd.DataFrame([diff, diff.div(df.max())], columns=["ramp_rate", "ramp_factor"])
+    if infer_boundaries:
+        # if a timeseries starts (or ends) with uptime, the first (last) boundary is outside our data range.
+        # This method uses the first (last) timestamp as the boundary: a lower bound on duration.
+        for col, boundary in {"startup": "first", "shutdown": "last"}.items():
+            # __getattr__ doesn't work here
+            boundary_timestamps = units.__getattribute__(boundary)()[["operating_datetime_utc"]]
+            joined_timestamps = events.join(boundary_timestamps, on="unit_id_epa", how="left")[
+                "operating_datetime_utc"
+            ]
+            events[col].fillna(joined_timestamps, inplace=True)
 
-    return cems.groupby(level="unit_id_epa")["gross_load_mw"].apply(inner)
+    events["duration_hours"] = (
+        events["shutdown"].sub(events["startup"]).dt.total_seconds().div(3600)
+    )
+    return events
