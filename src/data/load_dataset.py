@@ -6,15 +6,20 @@ import pandas as pd
 import pudl
 
 
+EPA_CROSSWALK_RELEASE = "https://github.com/USEPA/camd-eia-crosswalk/releases/download/v0.2.1/"
+
+
 def load_epacems(
     states: Optional[Sequence[str]] = ("CO",),
     years: Optional[Sequence[int]] = (2019,),
     columns: Optional[Sequence[str]] = (
+        "unit_id_epa",
         "plant_id_eia",
-        "unitid",
+        # "unitid",
         "operating_datetime_utc",
         "operating_time_hours",
         "gross_load_mw",
+        "steam_load_1000_lbs",
         "state",
     ),
     engine: Optional[str] = "pandas",
@@ -50,3 +55,7 @@ def load_epacems(
         ),
     )
     return cems
+
+
+def load_epa_crosswalk():
+    return pd.read_csv(EPA_CROSSWALK_RELEASE + "epa_eia_crosswalk.csv")
