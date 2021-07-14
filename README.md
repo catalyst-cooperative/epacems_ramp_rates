@@ -13,7 +13,7 @@ Outline of work and current progress:
   - [X] For peakers, check single-point spikes (unresolveable peaks).
   - [ ] For 'baseload', check that ramp rates are smaller than operating band
 - [ ] Idenfify maximum per-unit hourly load change
-- [ ] Join EPA emissions units with EIA generation units
+- [X] Join EPA emissions units with EIA generation units
 - [ ] Anomaly detection and imputation
 - [ ] Ramp rate sensitivity analysis
 - [ ] Finalize module or script to calculate ramp rates
