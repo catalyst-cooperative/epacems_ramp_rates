@@ -49,7 +49,7 @@ EIA_FUEL_MAP = {
     "RC": "coal",
     "RFO": "oil",
     "SC": "coal",
-    "SGC": "coal",
+    "SGC": "gas",
     "SGP": "gas",
     "SLW": "other",
     "SUB": "coal",
@@ -350,6 +350,7 @@ def aggregate_subcomponents(
         xwalk.groupby("component_id")["EIA_UNIT_TYPE"]
         .agg(lambda x: frozenset(x.values.reshape(-1)))
         .to_frame()
+        .astype("category")
     )
 
     for unit in ["CAMD_UNIT_ID", "EIA_GENERATOR_ID"]:
@@ -374,21 +375,31 @@ def aggregate_subcomponents(
         aggs[simple + "_via_capacity"] = _assign_by_capacity(xwalk, simple)
 
     aggs["simple_EIA_UNIT_TYPE"] = aggs["EIA_UNIT_TYPE"].map(tech_type_map)
+    aggs = aggs.astype(
+        {
+            "simple_EIA_UNIT_TYPE": "category",
+            "simple_EIA_FUEL_TYPE_via_capacity": "category",
+            "simple_CAMD_FUEL_TYPE_via_capacity": "category",
+        }
+    )
     return aggs
 
 
 def _assign_by_capacity(xwalk: pd.DataFrame, col: str) -> pd.Series:
     if "CAMD" in col:
-        agency = "CAMD"
+        unit = "CAMD_UNIT_ID"
+        capacity = "CAMD_NAMEPLATE_CAPACITY"
     elif "EIA" in col:
-        agency = "EIA"
+        unit = "EIA_GENERATOR_ID"
+        capacity = "EIA_NAMEPLATE_CAPACITY"
     else:
         raise ValueError(f"{col} must contain 'CAMD' or 'EIA'")
 
-    capacity = f"{agency}_NAMEPLATE_CAPACITY"
     # assign by category with highest capacity
     grouped = (
-        xwalk.groupby(by=["component_id", col], as_index=False)[capacity]
+        xwalk.groupby(by=["component_id", unit], as_index=False)
+        .first()  # avoid double counting units
+        .groupby(by=["component_id", col], as_index=False)[capacity]
         .sum()
         .replace({capacity: 0}, np.nan)
     )
