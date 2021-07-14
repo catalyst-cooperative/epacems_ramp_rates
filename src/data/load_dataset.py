@@ -37,9 +37,15 @@ def load_epacems(
     """
     if states is None:
         states = pudl.constants.us_states.keys()  # all states
+    else:
+        states = list(states)
     if years is None:
         years = pudl.constants.data_years["epacems"]  # all years
-    # columns=None is handled by pd.read_parquet, gives all columns
+    else:
+        years = list(years)
+    if columns is not None:
+        # columns=None is handled by pd.read_parquet, gives all columns
+        columns = list(columns)
     if engine != "pandas":
         raise NotImplementedError("dask engine not yet implemented. Only pandas")
 
