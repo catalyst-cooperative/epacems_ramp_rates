@@ -1,9 +1,79 @@
 # -*- coding: utf-8 -*-
-from typing import Sequence, Optional, Union, Tuple
+from typing import Dict, Optional, Union, Tuple
 
 import pandas as pd
 import numpy as np
-from pandas.core.series import Series
+import networkx as nx
+from pandas.core.frame import DataFrame
+
+CAMD_FUEL_MAP = {
+    "Pipeline Natural Gas": "gas",
+    "Coal": "coal",
+    "Diesel Oil": "oil",
+    "Natural Gas": "gas",
+    "Process Gas": "gas",
+    "Residual Oil": "oil",
+    "Other Gas": "gas",
+    "Wood": "other",
+    "Other Oil": "oil",
+    "Coal Refuse": "coal",
+    "Petroleum Coke": "oil",
+    "Tire Derived Fuel": "other",
+    "Other Solid Fuel": "other",
+}
+EIA_FUEL_MAP = {
+    "AB": "other",
+    "ANT": "coal",
+    "BFG": "gas",
+    "BIT": "coal",
+    "BLQ": "other",
+    "CBL": "Coal",
+    "DFO": "oil",
+    "JF": "oil",
+    "KER": "oil",
+    "LFG": "gas",
+    "LIG": "coal",
+    "MSB": "other",
+    "MSN": "other",
+    "MSW": "other",
+    "MWH": "other",
+    "NG": "gas",
+    "OBG": "gas",
+    "OBL": "other",
+    "OBS": "other",
+    "OG": "gas",
+    "OTH": "other",
+    "PC": "oil",
+    "PG": "gas",
+    "PUR": "other",
+    "RC": "coal",
+    "RFO": "oil",
+    "SC": "coal",
+    "SGC": "coal",
+    "SGP": "gas",
+    "SLW": "other",
+    "SUB": "coal",
+    "SUN": "gas",  # mis-categorized gas plants with 'solar' in the name
+    "TDF": "other",
+    "WC": "coal",
+    "WDL": "other",
+    "WDS": "other",
+    "WH": "other",
+    "WO": "oil",
+}
+TECH_TYPE_MAP = {
+    frozenset({"ST"}): "steam_turbine",
+    frozenset({"GT"}): "gas_turbine",
+    frozenset({"CT"}): "combined_cycle",  # in 2019 about half of solo CTs might be GTs
+    # Could classify by operational characteristics but there were only 20 total so didn't bother
+    frozenset({"CA"}): "combined_cycle",
+    frozenset({"CS"}): "combined_cycle",
+    frozenset({"IC"}): "internal_combustion",
+    frozenset({"CT", "CA"}): "combined_cycle",
+    frozenset({"ST", "GT"}): "combined_cycle",  # I think industrial cogen or mistaken
+    frozenset({"CA", "GT"}): "combined_cycle",  # most look mistaken
+    frozenset({"CT", "CA", "ST"}): "combined_cycle",  # most look mistaken
+}
 
 
 class FindStartupShutdown(object):
@@ -211,3 +281,122 @@ def uptime_events(cems: pd.DataFrame, infer_boundaries=True) -> pd.DataFrame:
         events["shutdown"].sub(events["startup"]).dt.total_seconds().div(3600)
     )
     return events
+
+
+def _prep_crosswalk_for_networkx(xwalk: pd.DataFrame, year_range: Tuple[int, int]) -> pd.DataFrame:
+    # remove retired or not-yet-existing units
+    min_year = year_range[0]
+    max_year = year_range[1]
+    year_filter = (pd.to_datetime(xwalk["CAMD_STATUS_DATE"]).dt.year <= min_year) & (
+        xwalk["CAMD_RETIRE_YEAR"].replace(0, 3000) > max_year
+    )
+    # remove unmatched or excluded (non-exporting) units
+    nonmatch_filter = ~xwalk["MATCH_TYPE_GEN"].isin({"CAMD Unmatched", "Manual CAMD Excluded"})
+
+    filtered = xwalk[year_filter & nonmatch_filter].copy()
+    # networkx can't handle composite keys, so make surrogates
+    filtered["combustor_id"] = filtered.groupby(by=["CAMD_PLANT_ID", "CAMD_UNIT_ID"]).ngroup()
+    # node IDs can't overlap so add (max + 1)
+    filtered["generator_id"] = (
+        filtered.groupby(by=["CAMD_PLANT_ID", "EIA_GENERATOR_ID"]).ngroup()
+        + filtered["combustor_id"].max()
+        + 1
+    )
+    return filtered
+
+
+def _subcomponent_ids_from_prepped_crosswalk(filtered: pd.DataFrame) -> pd.DataFrame:
+    graph = nx.from_pandas_edgelist(
+        filtered,
+        source="combustor_id",
+        target="generator_id",
+        edge_attr=True,
+    )
+    for i, node_set in enumerate(nx.connected_components(graph)):
+        subgraph = graph.subgraph(node_set)
+        assert nx.algorithms.bipartite.is_bipartite(
+            subgraph
+        ), f"non-bipartite: i={i}, node_set={node_set}"
+        nx.set_edge_attributes(subgraph, name="component_id", values=i)
+    return nx.to_pandas_edgelist(graph)
+
+
+def make_subcomponent_ids(xwalk: pd.DataFrame, cems: pd.DataFrame) -> pd.DataFrame:
+    column_order = list(xwalk.columns)
+    # index 24 hours inside the min/max to avoid timezone shenanigans
+    min_year = cems.index.levels[1][24].year
+    max_year = cems.index.levels[1][-24].year
+
+    filtered = _prep_crosswalk_for_networkx(xwalk, year_range=(min_year, max_year))
+    filtered = _subcomponent_ids_from_prepped_crosswalk(filtered)
+    column_order = ["component_id"] + column_order
+    return filtered[column_order]
+
+
+def aggregate_subcomponents(
+    xwalk: pd.DataFrame,
+    camd_fuel_map: Optional[Dict[str, str]] = None,
+    eia_fuel_map: Optional[Dict[str, str]] = None,
+    tech_type_map: Optional[Dict[str, str]] = None,
+) -> pd.DataFrame:
+    if camd_fuel_map is None:
+        camd_fuel_map = CAMD_FUEL_MAP
+    if eia_fuel_map is None:
+        eia_fuel_map = EIA_FUEL_MAP
+    if tech_type_map is None:
+        tech_type_map = TECH_TYPE_MAP
+
+    aggs = (
+        xwalk.groupby("component_id")["EIA_UNIT_TYPE"]
+        .agg(lambda x: frozenset(x.values.reshape(-1)))
+        .to_frame()
+    )
+
+    for unit in ["CAMD_UNIT_ID", "EIA_GENERATOR_ID"]:
+        agency = unit.split("_", maxsplit=1)[0]
+        capacity = f"{agency}_NAMEPLATE_CAPACITY"
+        aggs[f"capacity_{agency}"] = (
+            xwalk.groupby(by=["component_id", unit], as_index=False)
+            .first()  # avoid double counting
+            .groupby("component_id")[capacity]
+            .sum()
+            .replace(0, np.nan)
+        )
+    for col, mapping in {
+        "CAMD_FUEL_TYPE": camd_fuel_map,
+        "EIA_FUEL_TYPE": eia_fuel_map,
+    }.items():
+        nan_count = xwalk[col].isna().sum()
+        simple = f"simple_{col}"
+        xwalk[simple] = xwalk[col].map(mapping)
+        if xwalk[simple].isna().sum() > nan_count:
+            raise ValueError(f"there is a category in {col} not present in mapping {mapping}")
+        aggs[simple + "_via_capacity"] = _assign_by_capacity(xwalk, simple)
+
+    aggs["simple_EIA_UNIT_TYPE"] = aggs["EIA_UNIT_TYPE"].map(tech_type_map)
+    return aggs
+
+
+def _assign_by_capacity(xwalk: pd.DataFrame, col: str) -> pd.Series:
+    if "CAMD" in col:
+        agency = "CAMD"
+    elif "EIA" in col:
+        agency = "EIA"
+    else:
+        raise ValueError(f"{col} must contain 'CAMD' or 'EIA'")
+
+    capacity = f"{agency}_NAMEPLATE_CAPACITY"
+    # assign by category with highest capacity
+    grouped = (
+        xwalk.groupby(by=["component_id", col], as_index=False)[capacity]
+        .sum()
+        .replace({capacity: 0}, np.nan)
+    )
+    grouped["max"] = grouped.groupby("component_id")[capacity].transform(np.max)
+    out = grouped.loc[grouped["max"] == grouped[capacity], ["component_id", col]].set_index(
+        "component_id"
+    )
+    # break ties by taking first category (alphabetical due to groupby)
+    # this is not very principled but it is rare enough to probably not matter
+    out = out[~out.index.duplicated(keep="first")]
+    return out
