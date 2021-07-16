@@ -197,7 +197,7 @@ def _binarize(ser: pd.Series):
     return ser.gt(0).astype(np.int8)
 
 
-def _find_edges(cems: pd.DataFrame, drop_intermediates=True) -> pd.DataFrame:
+def _find_edges(cems: pd.DataFrame, drop_intermediates=True) -> None:
     """find timestamps of startups and shutdowns based on transition from zero to non-zero generation"""
     cems["binarized"] = _binarize(cems["gross_load_mw"])
     # for each unit, find change points from zero to non-zero production
@@ -210,12 +210,12 @@ def _find_edges(cems: pd.DataFrame, drop_intermediates=True) -> pd.DataFrame:
     cems["startups"] = cems["operating_datetime_utc"].where(cems["binary_diffs"] == 1, pd.NaT)
     if drop_intermediates:
         cems.drop(columns=["binarized", "binary_diffs"], inplace=True)
-    return cems
+    return
 
 
 def _distance_from_downtime(
     cems: pd.DataFrame, drop_intermediates=True, boundary_offset_hours: int = 24
-) -> pd.DataFrame:
+) -> None:
     """calculate two columns: the number of hours to the next shutdown; and from the last startup"""
     # fill startups forward and shutdowns backward
     # Note that this leaves NaT values for any uptime periods at the very start/end of the timeseries
@@ -249,13 +249,26 @@ def _distance_from_downtime(
     )
     if drop_intermediates:
         cems.drop(columns=["startups", "shutdowns"], inplace=True)
-    return cems
+    return None
 
 
-def calc_distance_from_downtime(cems: pd.DataFrame, drop_intermediates=True) -> pd.DataFrame:
+def calc_distance_from_downtime(
+    cems: pd.DataFrame, classify_startup=False, drop_intermediates=True
+) -> None:
     """calculate two columns: the number of hours to the next shutdown; and from the last startup"""
-    cems = _find_edges(cems, drop_intermediates)
-    return _distance_from_downtime(cems, drop_intermediates)
+    # in place
+    _find_edges(cems, drop_intermediates)
+    _distance_from_downtime(cems, drop_intermediates)
+    cems["hours_distance"] = cems[["hours_from_startup", "hours_to_shutdown"]].min(axis=1)
+    if classify_startup:
+        cems["nearest_to_startup"] = cems["hours_from_startup"] < cems["hours_to_shutdown"]
+        # randomly allocate midpoints
+        rng = np.random.default_rng(seed=42)
+        rand_midpoints = (cems["hours_from_startup"] == cems["hours_to_shutdown"]) & rng.choice(
+            np.array([True, False]), size=len(cems)
+        )
+        cems.loc[rand_midpoints, "nearest_to_startup"] = True
+    return None
 
 
 def uptime_events(cems: pd.DataFrame, infer_boundaries=True) -> pd.DataFrame:
@@ -283,17 +296,32 @@ def uptime_events(cems: pd.DataFrame, infer_boundaries=True) -> pd.DataFrame:
     return events
 
 
-def _prep_crosswalk_for_networkx(xwalk: pd.DataFrame, year_range: Tuple[int, int]) -> pd.DataFrame:
-    # remove retired or not-yet-existing units
+def _filter_retirements(df: pd.DataFrame, year_range: Tuple[int, int]) -> pd.DataFrame:
+    """remove retired or not-yet-existing units that have zero overlap with year_range"""
     min_year = year_range[0]
     max_year = year_range[1]
-    year_filter = (pd.to_datetime(xwalk["CAMD_STATUS_DATE"]).dt.year <= min_year) & (
-        xwalk["CAMD_RETIRE_YEAR"].replace(0, 3000) > max_year
-    )
-    # remove unmatched or excluded (non-exporting) units
-    nonmatch_filter = ~xwalk["MATCH_TYPE_GEN"].isin({"CAMD Unmatched", "Manual CAMD Excluded"})
 
-    filtered = xwalk[year_filter & nonmatch_filter].copy()
+    not_retired_before_start = df["CAMD_RETIRE_YEAR"].replace(0, 3000) >= min_year
+    not_built_after_end = (pd.to_datetime(df["CAMD_STATUS_DATE"]).dt.year <= max_year) & df[
+        "CAMD_STATUS"
+    ].ne("RET")
+    return df.loc[not_retired_before_start & not_built_after_end]
+
+
+def _remove_irrelevant(df: pd.DataFrame):
+    """remove unmatched or excluded (non-exporting) units"""
+    bad = df["MATCH_TYPE_GEN"].isin({"CAMD Unmatched", "Manual CAMD Excluded"})
+    return df.loc[~bad]
+
+
+def _prep_crosswalk_for_networkx(
+    xwalk: pd.DataFrame, remove_retired_or_irrelevant=False, **kwargs
+) -> pd.DataFrame:
+    if remove_retired_or_irrelevant:
+        filtered = _filter_retirements(xwalk, **kwargs)
+        filtered = _remove_irrelevant(filtered).copy()
+    else:
+        filtered = xwalk.copy()
     # networkx can't handle composite keys, so make surrogates
     filtered["combustor_id"] = filtered.groupby(by=["CAMD_PLANT_ID", "CAMD_UNIT_ID"]).ngroup()
     # node IDs can't overlap so add (max + 1)
@@ -305,9 +333,9 @@ def _prep_crosswalk_for_networkx(xwalk: pd.DataFrame, year_range: Tuple[int, int
     return filtered
 
 
-def _subcomponent_ids_from_prepped_crosswalk(filtered: pd.DataFrame) -> pd.DataFrame:
+def _subcomponent_ids_from_prepped_crosswalk(prepped: pd.DataFrame) -> pd.DataFrame:
     graph = nx.from_pandas_edgelist(
-        filtered,
+        prepped,
         source="combustor_id",
         target="generator_id",
         edge_attr=True,
@@ -321,13 +349,20 @@ def _subcomponent_ids_from_prepped_crosswalk(filtered: pd.DataFrame) -> pd.DataF
     return nx.to_pandas_edgelist(graph)
 
 
-def make_subcomponent_ids(xwalk: pd.DataFrame, cems: pd.DataFrame) -> pd.DataFrame:
+def make_subcomponent_ids(
+    xwalk: pd.DataFrame, cems: pd.DataFrame, remove_retired_or_irrelevant=False
+) -> pd.DataFrame:
     column_order = list(xwalk.columns)
-    # index 24 hours inside the min/max to avoid timezone shenanigans
-    min_year = cems.index.levels[1][24].year
-    max_year = cems.index.levels[1][-24].year
+    year_range = None
+    if remove_retired_or_irrelevant:
+        # index 24 hours inside the min/max to avoid timezone shenanigans
+        min_year = cems.index.levels[1][24].year
+        max_year = cems.index.levels[1][-24].year
+        year_range = (min_year, max_year)
 
-    filtered = _prep_crosswalk_for_networkx(xwalk, year_range=(min_year, max_year))
+    filtered = _prep_crosswalk_for_networkx(
+        xwalk, remove_retired_or_irrelevant=remove_retired_or_irrelevant, year_range=year_range
+    )
     filtered = _subcomponent_ids_from_prepped_crosswalk(filtered)
     column_order = ["component_id"] + column_order
     return filtered[column_order]
