@@ -18,7 +18,10 @@ def plot_component_max_ramp(
     cdf=False,
     subplot_kwargs: Optional[Dict[str, Any]] = None,
 ) -> None:
-    has_steam = component_aggs.at[component_id, "max_of_sum_steam_load_1000_lbs"] > 0
+    try:
+        has_steam = component_aggs.at[component_id, "max_of_sum_steam_load_1000_lbs"] > 0
+    except KeyError:
+        has_steam = False
     if has_steam:
         raise NotImplementedError("component has steam unit")
     window_offset = pd.Timedelta(window_hours / 2, "h")

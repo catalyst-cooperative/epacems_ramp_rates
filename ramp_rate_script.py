@@ -36,6 +36,12 @@ YEARS_TO_PROCESS = [2017]  # list(range(2015, 2020))
 
 
 def process_subset(cems, crosswalk, component_id_offset=0):
+    if "unit_id_epa" not in cems.index.names:
+        cems = cems.set_index(
+            ["unit_id_epa", "operating_datetime_utc"],
+            drop=False,
+        ).sort_index(inplace=True)
+
     feat.calc_distance_from_downtime(cems)  # in place
     key_map = cems.groupby(level="unit_id_epa")[["plant_id_eia", "unitid", "unit_id_epa"]].first()
     key_map = key_map.merge(
@@ -164,7 +170,6 @@ def main(out_path: str, chunk_size: int):
             ["unit_id_epa", "operating_datetime_utc"],
             drop=False,
             inplace=True,
-            verify_integrity=True,
         )
         cems.sort_index(inplace=True)
 
