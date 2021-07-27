@@ -2,7 +2,7 @@ import pytest
 import pandas as pd
 import numpy as np
 
-from src.features.build_features import _find_uptime
+from ramprate.build_features import _find_uptime
 
 
 def test__find_uptime_start_and_end_nonzero():

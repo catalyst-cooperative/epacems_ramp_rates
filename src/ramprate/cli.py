@@ -17,8 +17,8 @@ import pandas as pd
 import numpy as np
 from tqdm import tqdm
 
-from src.data.load_dataset import load_epacems, load_epa_crosswalk
-import src.features.build_features as feat
+from ramprate.load_dataset import load_epacems, load_epa_crosswalk
+import ramprate.build_features as feat
 import pudl
 
 idx = pd.IndexSlice
@@ -32,7 +32,7 @@ EXCLUSION_SIZE_HOURS = {
     "gas_turbine": -1,  # no exclusions
     "internal_combustion": -1,  # no exclusions
 }
-YEARS_TO_PROCESS = [2017]  # list(range(2015, 2020))
+YEARS_TO_PROCESS = list(range(2015, 2020))
 
 
 def process_subset(cems, crosswalk, component_id_offset=0):
