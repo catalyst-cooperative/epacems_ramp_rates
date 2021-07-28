@@ -18,8 +18,8 @@ from typing import Optional, Sequence
 import pandas as pd
 from tqdm import tqdm
 
-from pudl.constants import us_states
-from ramprate.load_dataset import load_epacems, load_epa_crosswalk
+# from pudl.constants import us_states
+from ramprate.load_dataset import load_epacems, load_epa_crosswalk, ALL_STATES
 from ramprate.build_features import process_subset, _remove_irrelevant
 
 
@@ -40,7 +40,8 @@ def process(
         raise ValueError(f"Parent directory does not exist: {out_path.parent.absolute()}")
 
     if state_subset is None:
-        state_subset = us_states.keys()  # all states
+        # state_subset = us_states.keys()  # all states
+        state_subset = ALL_STATES
     # exlude territories, which are not in EPA CEMS
     states = [state for state in state_subset if state not in TERRITORIES]
 
