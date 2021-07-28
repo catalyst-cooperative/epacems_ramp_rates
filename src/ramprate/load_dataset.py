@@ -5,6 +5,9 @@ import itertools
 from os import getenv
 
 import pandas as pd
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # from makefile:install
 EPA_CEMS_DATA_PATH = getenv("EPA_CEMS_DATA_PATH")

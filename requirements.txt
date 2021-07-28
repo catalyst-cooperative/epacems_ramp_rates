@@ -2,10 +2,11 @@
 -e .
 
 # external requirements
-# catalyst-coop.pudl==0.4
 pandas==1.2.4
 matplotlib==3.4.2
 networkx==2.5
 numpy==1.20.3
 pyarrow==3.0.0
 tqdm==4.61.0
+notebook==6.4.0
+python-dotenv==0.19.0 
