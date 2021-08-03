@@ -2,6 +2,7 @@
 from typing import Dict, Optional, Union, Tuple
 
 import pandas as pd
+import dask.dataframe as dd
 import numpy as np
 import networkx as nx
 
@@ -290,33 +291,30 @@ def uptime_events(cems: pd.DataFrame, infer_boundaries=True) -> pd.DataFrame:
     return events
 
 
-def _filter_retirements(df: pd.DataFrame, year_range: Tuple[int, int]) -> pd.DataFrame:
+def _filter_retirements(crosswalk: pd.DataFrame, year_range: Tuple[int, int]) -> pd.DataFrame:
     """remove retired or not-yet-existing units that have zero overlap with year_range"""
+    # index 24 hours inside the min/max to avoid timezone shenanigans
+    # min_year = cems.index.levels[1][24].year
+    # max_year = cems.index.levels[1][-24].year
     min_year = year_range[0]
     max_year = year_range[1]
 
-    not_retired_before_start = df["CAMD_RETIRE_YEAR"].replace(0, 3000) >= min_year
-    not_built_after_end = (pd.to_datetime(df["CAMD_STATUS_DATE"]).dt.year <= max_year) & df[
-        "CAMD_STATUS"
-    ].ne("RET")
-    return df.loc[not_retired_before_start & not_built_after_end]
+    not_retired_before_start = crosswalk["CAMD_RETIRE_YEAR"].replace(0, 3000) >= min_year
+    not_built_after_end = (
+        pd.to_datetime(crosswalk["CAMD_STATUS_DATE"]).dt.year <= max_year
+    ) & crosswalk["CAMD_STATUS"].ne("RET")
+    return crosswalk.loc[not_retired_before_start & not_built_after_end]
 
 
-def _remove_irrelevant(df: pd.DataFrame):
+def _remove_irrelevant(crosswalk: pd.DataFrame):
     """remove unmatched or excluded (non-exporting) units"""
-    bad = df["MATCH_TYPE_GEN"].isin({"CAMD Unmatched", "Manual CAMD Excluded"})
-    return df.loc[~bad]
+    bad = crosswalk["MATCH_TYPE_GEN"].isin({"CAMD Unmatched", "Manual CAMD Excluded"})
+    return crosswalk.loc[~bad]
 
 
-def _prep_crosswalk_for_networkx(
-    xwalk: pd.DataFrame, remove_retired_or_irrelevant=False, **kwargs
-) -> pd.DataFrame:
-    if remove_retired_or_irrelevant:
-        filtered = _filter_retirements(xwalk, **kwargs)
-        filtered = _remove_irrelevant(filtered).copy()
-    else:
-        filtered = xwalk.copy()
-    # networkx can't handle composite keys, so make surrogates
+def _make_surrogate_ids(xwalk: pd.DataFrame) -> pd.DataFrame:
+    """Prep crosswalk for networkx by making surrogate IDs. Networkx can't handle composite keys."""
+    filtered = xwalk.copy()
     filtered["combustor_id"] = filtered.groupby(by=["CAMD_PLANT_ID", "CAMD_UNIT_ID"]).ngroup()
     # node IDs can't overlap so add (max + 1)
     filtered["generator_id"] = (
@@ -343,20 +341,19 @@ def _subcomponent_ids_from_prepped_crosswalk(prepped: pd.DataFrame) -> pd.DataFr
     return nx.to_pandas_edgelist(graph)
 
 
-def make_subcomponent_ids(
-    xwalk: pd.DataFrame, cems: pd.DataFrame, remove_retired_or_irrelevant=False
-) -> pd.DataFrame:
-    column_order = list(xwalk.columns)
-    year_range = None
-    if remove_retired_or_irrelevant:
-        # index 24 hours inside the min/max to avoid timezone shenanigans
-        min_year = cems.index.levels[1][24].year
-        max_year = cems.index.levels[1][-24].year
-        year_range = (min_year, max_year)
-
-    filtered = _prep_crosswalk_for_networkx(
-        xwalk, remove_retired_or_irrelevant=remove_retired_or_irrelevant, year_range=year_range
+def make_subcomponent_ids(xwalk: pd.DataFrame, cems: dd.DataFrame) -> pd.DataFrame:
+    key_map = (
+        cems.groupby("unit_id_epa")[["plant_id_eia", "unitid", "unit_id_epa"]].first().compute()
     )
+    key_map = key_map.merge(
+        xwalk,
+        left_on=["plant_id_eia", "unitid"],
+        right_on=["CAMD_PLANT_ID", "CAMD_UNIT_ID"],
+        how="inner",
+    )
+
+    column_order = list(key_map.columns)
+    filtered = _make_surrogate_ids(key_map)
     filtered = _subcomponent_ids_from_prepped_crosswalk(filtered)
     column_order = ["component_id"] + column_order
     return filtered[column_order]
@@ -458,27 +455,14 @@ def process_subset(cems, crosswalk, component_id_offset=0):
         "cems": CEMS data
     }
     """
-    if "unit_id_epa" not in cems.index.names:
-        cems = cems.set_index(
-            ["unit_id_epa", "operating_datetime_utc"],
-            drop=False,
-        ).sort_index(inplace=True)
 
-    calc_distance_from_downtime(cems)  # in place
-    key_map = cems.groupby(level="unit_id_epa")[["plant_id_eia", "unitid", "unit_id_epa"]].first()
-    key_map = key_map.merge(
-        crosswalk,
-        left_on=["plant_id_eia", "unitid"],
-        right_on=["CAMD_PLANT_ID", "CAMD_UNIT_ID"],
-        how="inner",
-    )
-    key_map = make_subcomponent_ids(key_map, cems)
-    if component_id_offset:
-        key_map["component_id"] = key_map["component_id"] + component_id_offset
+    key_map = make_subcomponent_ids(crosswalk, cems)
+    key_map = dd.from_pandas(key_map)
 
     # NOTE: how='inner' drops unmatched units
     cems = cems.join(key_map.groupby("unit_id_epa")["component_id"].first(), how="inner")
 
+    calc_distance_from_downtime(cems)  # in place
     # Aggregate to components
     # aggregate metadata
     meta = aggregate_subcomponents(key_map)
