@@ -1,132 +1,13 @@
 # -*- coding: utf-8 -*-
-# from pathlib import Path
+from pathlib import Path
 from typing import Sequence, Optional
-import itertools
-from os import getenv
 
 import pandas as pd
-from dotenv import load_dotenv
+import dask.dataframe as dd
 
-load_dotenv()
-
-# from makefile:install
-EPA_CEMS_DATA_PATH = getenv("EPA_CEMS_DATA_PATH")
+import pudl
 
 EPA_CROSSWALK_RELEASE = "https://github.com/USEPA/camd-eia-crosswalk/releases/download/v0.2.1/"
-
-ALL_STATES = (  # includes territories and DC
-    "AK",
-    "AL",
-    "AR",
-    "AS",
-    "AZ",
-    "CA",
-    "CO",
-    "CT",
-    "DC",
-    "DE",
-    "FL",
-    "GA",
-    "GU",
-    "HI",
-    "IA",
-    "ID",
-    "IL",
-    "IN",
-    "KS",
-    "KY",
-    "LA",
-    "MA",
-    "MD",
-    "ME",
-    "MI",
-    "MN",
-    "MO",
-    "MP",
-    "MS",
-    "MT",
-    "NA",
-    "NC",
-    "ND",
-    "NE",
-    "NH",
-    "NJ",
-    "NM",
-    "NV",
-    "NY",
-    "OH",
-    "OK",
-    "OR",
-    "PA",
-    "PR",
-    "RI",
-    "SC",
-    "SD",
-    "TN",
-    "TX",
-    "UT",
-    "VA",
-    "VI",
-    "VT",
-    "WA",
-    "WI",
-    "WV",
-    "WY",
-)
-
-ALL_CEMS_YEARS = range(1995, 2020)
-
-
-def year_state_filter(years=(), states=()):
-    """
-    Create filters to read given years and states from partitioned parquet dataset.
-
-    This function was the only dependency on the pudl repo, so I copied it from
-    pudl.outputs.epacems.py:year_state_filter
-
-    A subset of an Apache Parquet dataset can be read in more efficiently if files
-    which don't need to be queried are avoideed. Some datasets are partitioned based
-    on the values of columns to make this easier. The EPA CEMS dataset which we
-    publish is partitioned by state and report year.
-
-    This function takes a set of years, and a set of states, and returns a list of lists
-    of tuples, appropriate for use with the read_parquet() methods of pandas and dask
-    dataframes.
-
-    Args:
-        years (iterable): 4-digit integers indicating the years of data you would like
-            to read. By default it includes all years.
-        states (iterable): 2-letter state abbreviations indicating what states you would
-            like to include. By default it includes all states.
-
-    Returns:
-        list: A list of lists of tuples, suitable for use as a filter in the
-        read_parquet method of pandas and dask dataframes.
-
-    """
-    year_filters = [("year", "=", year) for year in years]
-    state_filters = [("state", "=", state.upper()) for state in states]
-
-    if states and not years:
-        filters = [
-            [
-                tuple(x),
-            ]
-            for x in state_filters
-        ]
-    elif years and not states:
-        filters = [
-            [
-                tuple(x),
-            ]
-            for x in year_filters
-        ]
-    elif years and states:
-        filters = [list(x) for x in itertools.product(year_filters, state_filters)]
-    else:
-        filters = None
-
-    return filters
 
 
 def load_epacems(
@@ -166,35 +47,38 @@ def load_epacems(
     Returns:
         pd.DataFrame: epacems data
     """
+    if engine == "pandas":
+        dataframe = pd
+    elif engine == "dask":
+        dataframe = dd
+    else:
+        raise ValueError(f"engine must be either 'pandas' or 'dask'. Given: {engine}")
+
     if states is None:
-        states = list(ALL_STATES)
-        # states = pudl.constants.us_states.keys()  # all states
+        states = pudl.constants.us_states.keys()  # all states
     else:
         states = list(states)
     if years is None:
-        years = list(ALL_CEMS_YEARS)
-        # years = pudl.constants.data_years["epacems"]  # all years
+        years = pudl.constants.data_years["epacems"]  # all years
     else:
         years = list(years)
     if columns is not None:
         # columns=None is handled by pd.read_parquet, gives all columns
         columns = list(columns)
-    if engine != "pandas":
-        raise NotImplementedError("dask engine not yet implemented. Only pandas")
 
-    # pudl_settings = pudl.workspace.setup.get_defaults()
-    # cems_path = Path(pudl_settings["parquet_dir"]) / "epacems"
-    cems = pd.read_parquet(
-        # cems_path,
-        EPA_CEMS_DATA_PATH,
+    pudl_settings = pudl.workspace.setup.get_defaults()
+    cems_path = Path(pudl_settings["parquet_dir"]) / "epacems"
+
+    cems = dataframe.read_parquet(
+        cems_path,
         use_nullable_dtypes=True,
         columns=columns,
-        # filters=pudl.output.epacems.year_state_filter(
-        filters=year_state_filter(
+        filters=pudl.output.epacems.year_state_filter(
             states=states,
             years=years,
         ),
     )
+
     return cems
 
 
