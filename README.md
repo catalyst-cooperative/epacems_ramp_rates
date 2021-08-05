@@ -17,6 +17,10 @@ To create .csv files with the results of this analysis, use the CLI:`$ calc_ramp
 
 For interactive use in a jupyter notebook, see the example in notebooks/8.0-tb-example_of_interactive_use.ipynb. Notebooks 0.0 to 7.0 were used for development and are not well documented.
 
+### Output Data Dictionary
+
+See [/results/REAMDE.md](https://github.com/catalyst-cooperative/epacems_ramp_rates/tree/main/results)
+
 ## Methodology
 
 Ramping capacity depends on the time scale of interest (some plants need several hours of advance notice to reach their maximum ramp rate, some need only minutes) and also depends on economically-driven plant operations (a plant already running at max capacity cannot ramp up, for example). With only generation timeseries, it is not possible to completely separate physical constraints from economic/behavioral constraints on ramping. But because economic conditions change over time, whereas physical constraints are mostly static, we can estimate physical constraints by looking at the extrema over a period of time. The assumption here is that economic constraints were negligible at some points in time, and at those times the underlying physical constraint will be revealed.
@@ -52,7 +56,10 @@ Categorical metadata like turbine type and fuel type are also aggregated to the 
 1. EPA emissions data only exists for plants that create emissions (combustion-based plants). Nuclear and hydro plants, for example, are not included.
 2. Hourly CEMS data is sufficient to resolve ramp rates *only* for slow-ramping plant types like steam turbines and combined cycle plants. I left ramp rate estimates for fast-ramping gas turbines and internal combustion units in the output file, so it is up to the user to replace them with something more appropriate, such the plant max capacity.
 3. The cold start/stop exclusion process is not perfect. Because maxima are so sensitive to outliers, cold starts that slip through the filter can impose a strong upward bias on effected max ramp rate estimates. When aggregating, I recommend using a robust estimate like a median instead of a mean.
-4. The EPA gives steam turbines the option of reporting either electrical generation or steam production. This includes the heat recovery steam turbines in combined cycle plants. 120 units (out of about 3300) elected to report steam production only, and they are not currently included in this analysis. 111 are independent steam turbines; their max ramp rate estimates are present in the output as 0.0 values. 9 are steam turbines connected to other components, like in a combined cycle; their generation is simply missing from the total output and will thus distort ramp rate estimates for those facilities.
+4. The EPA gives steam turbines the option of reporting either electrical generation or steam production. This includes the heat recovery steam turbines in combined cycle plants.
+   * 120 units (out of about 3300) elected to report steam production only. They are not currently included in this analysis.
+     * 111 are independent steam turbines; their max ramp rate estimates are present in the output as 0.0 values.
+     * 9 are steam turbines connected to other components, like in a combined cycle; their generation is simply missing from the total output and will thus distort ramp rate estimates for those facilities.
 5. System-wide ramping capacity is not equal to the sum of plant ramping capacities due to correlated operation, among other things. No attempt has been made to answer this separate question.
 
 ## Project Organization
