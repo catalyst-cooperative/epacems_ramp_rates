@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-from typing import Dict, Optional, Union, Tuple
+from typing import Dict, Optional, Sequence, Union, Tuple, Any, Union
 
 import pandas as pd
 import dask.dataframe as dd
@@ -192,6 +192,12 @@ def _binarize(ser: pd.Series):
     return ser.gt(0).astype(np.int8)
 
 
+def _drop_cols_no_copy(dask_df: dd.DataFrame, cols: Sequence[str]) -> dd.DataFrame:
+    """.drop with no copy. No inplace option in dask"""
+    keep = [col for col in dask_df.columns if col not in set(cols)]
+    return dask_df.loc[:, keep]
+
+
 def _find_edges(cems: pd.DataFrame, drop_intermediates=True) -> None:
     """find timestamps of startups and shutdowns based on transition from zero to non-zero generation"""
     cems["binarized"] = _binarize(cems["gross_load_mw"])
@@ -204,8 +210,8 @@ def _find_edges(cems: pd.DataFrame, drop_intermediates=True) -> None:
     cems["shutdowns"] = cems["operating_datetime_utc"].where(cems["binary_diffs"] == -1, pd.NaT)
     cems["startups"] = cems["operating_datetime_utc"].where(cems["binary_diffs"] == 1, pd.NaT)
     if drop_intermediates:
-        cems.drop(columns=["binarized", "binary_diffs"], inplace=True)
-    return
+        cems = _drop_cols_no_copy(cems, {"binarized", "binary_diffs"})
+    return None
 
 
 def _distance_from_downtime(
@@ -243,7 +249,7 @@ def _distance_from_downtime(
         .astype(np.float32)
     )
     if drop_intermediates:
-        cems.drop(columns=["startups", "shutdowns"], inplace=True)
+        cems = _drop_cols_no_copy(cems, {"startup", "shutdown"})
     return None
 
 
@@ -341,17 +347,22 @@ def _subcomponent_ids_from_prepped_crosswalk(prepped: pd.DataFrame) -> pd.DataFr
     return nx.to_pandas_edgelist(graph)
 
 
-def make_subcomponent_ids(xwalk: pd.DataFrame, cems: dd.DataFrame) -> pd.DataFrame:
-    key_map = (
-        cems.groupby("unit_id_epa")[["plant_id_eia", "unitid", "unit_id_epa"]].first().compute()
-    )
+def make_subcomponent_ids(
+    xwalk: pd.DataFrame, cems: Union[pd.DataFrame, dd.DataFrame]
+) -> pd.DataFrame:
+    if isinstance(cems, dd.DataFrame):
+        gb_args = dict(by="unit_id_epa", group_keys=False)
+    else:
+        gb_args = dict(level="unit_id_epa")
+    key_map = cems.groupby(**gb_args)[["plant_id_eia", "unitid", "unit_id_epa"]].first()
     key_map = key_map.merge(
         xwalk,
         left_on=["plant_id_eia", "unitid"],
         right_on=["CAMD_PLANT_ID", "CAMD_UNIT_ID"],
         how="inner",
     )
-
+    if isinstance(key_map, dd.DataFrame):
+        key_map = key_map.compute()
     column_order = list(key_map.columns)
     filtered = _make_surrogate_ids(key_map)
     filtered = _subcomponent_ids_from_prepped_crosswalk(filtered)
@@ -439,7 +450,44 @@ def _assign_by_capacity(xwalk: pd.DataFrame, col: str) -> pd.Series:
     return out
 
 
-def process_subset(cems, crosswalk, component_id_offset=0):
+def _create_exclusion_flags(df: pd.DataFrame) -> None:
+    grp = df.groupby(level="unit_id_epa")
+    df["zero_load"] = df["gross_load_mw"].eq(0)
+    df["exclude_ramp"] = False
+    for tech_type, radius in EXCLUSION_SIZE_HOURS.items():
+        if radius < 0:
+            continue
+        exclude = (
+            grp.rolling(f"{radius * 2 + 1}h", centered=True, on="operating_datetime_utc")[
+                "zero_load"
+            ]
+            .sum()
+            .gt(0)
+        )
+        # set 'exclude_ramp' based on tech_type-specific radius
+        df.loc[:, "exclude_ramp"].where(
+            df["simple_EIA_UNIT_TYPE"].ne(tech_type), other=exclude, inplace=True
+        )
+
+    df.drop(columns=["zero_load"], inplace=True)
+    return
+
+
+def _add_subcomponent_ids_and_meta(cems: dd.DataFrame, crosswalk: pd.DataFrame) -> Dict[str, Any]:
+    key_map = make_subcomponent_ids(crosswalk, cems).astype({"unit_id_epa": np.int32})
+    meta = aggregate_subcomponents(key_map)
+    # join in component_id
+    # NOTE: how='inner' drops unmatched units
+    cems = cems.join(
+        key_map.groupby("unit_id_epa")[["component_id"]].first(),
+        how="inner",
+    )
+
+    cems = cems.merge(meta[["simple_EIA_UNIT_TYPE"]], left_on="component_id", right_index=True)
+    return {"key_map": key_map, "meta": meta, "cems": cems}
+
+
+def process_partition(cems_partition: pd.DataFrame, return_intermediates=False):
     """Top level API to analyze a dataset for component-wise max ramp rates
 
     Args:
@@ -455,25 +503,16 @@ def process_subset(cems, crosswalk, component_id_offset=0):
         "cems": CEMS data
     }
     """
-
-    key_map = make_subcomponent_ids(crosswalk, cems)
-    key_map = dd.from_pandas(key_map)
-
-    # NOTE: how='inner' drops unmatched units
-    cems = cems.join(key_map.groupby("unit_id_epa")["component_id"].first(), how="inner")
-
-    calc_distance_from_downtime(cems)  # in place
-    # Aggregate to components
-    # aggregate metadata
-    meta = aggregate_subcomponents(key_map)
-    # aggregate operational data
-    cems = cems.merge(
-        meta["simple_EIA_UNIT_TYPE"], left_on="component_id", right_index=True, copy=False
+    cems = cems_partition.copy()
+    cems.set_index(
+        ["unit_id_epa", "operating_datetime_utc"],
+        drop=False,
+        inplace=True,
     )
     cems.sort_index(inplace=True)
-    cems["exclude_ramp"] = cems["hours_distance"] <= cems["simple_EIA_UNIT_TYPE"].map(
-        EXCLUSION_SIZE_HOURS
-    ).astype(np.float32)
+
+    _create_exclusion_flags(cems)
+
     # combine units' timeseries into a single timeseries per component
     component_timeseries = (
         cems.drop(columns=["operating_datetime_utc"])  # resolve name collision with index
@@ -522,10 +561,10 @@ def process_subset(cems, crosswalk, component_id_offset=0):
     ramps.columns = ["_".join(reversed(col)) for col in ramps.columns]
 
     # join all the aggs
-    component_aggs = component_aggs.join([ramps, meta])
+    component_aggs = component_aggs.join([ramps])  # , meta])
 
     # normalize ramp rates in various ways
-    normed = component_aggs[["max_abs_ramp"] * 4].div(
+    """ normed = component_aggs[["max_abs_ramp"] * 4].div(
         component_aggs[
             [
                 "capacity_CAMD",
@@ -537,9 +576,13 @@ def process_subset(cems, crosswalk, component_id_offset=0):
     )
     normed.columns = ["ramp_factor_" + suf for suf in ["CAMD", "EIA", "sum_max", "max_sum"]]
     component_aggs = component_aggs.join(normed)
-    return {
-        "component_aggs": component_aggs,
-        "key_map": key_map,
-        "component_timeseries": component_timeseries,
-        "cems": cems,
-    }
+    """
+
+    if return_intermediates:
+        return {
+            "component_aggs": component_aggs,
+            "component_timeseries": component_timeseries,
+            "cems": cems,
+        }
+    else:
+        return {"component_aggs": component_aggs}
