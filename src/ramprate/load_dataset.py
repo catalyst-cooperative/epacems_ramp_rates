@@ -3,7 +3,6 @@ from pathlib import Path
 from typing import Sequence, Optional
 
 import pandas as pd
-import dask.dataframe as dd
 
 import pudl
 
@@ -34,26 +33,17 @@ def load_epacems(
         # "year",
         # "state",
     ),
-    engine: Optional[str] = "pandas",
 ) -> pd.DataFrame:
     """load EPA CEMS data from PUDL with optional subsetting
 
     Args:
         states (Optional[Sequence[str]], optional): subset by state abbreviation. Pass None to get all states. Defaults to ("CO",).
         years (Optional[Sequence[int]], optional): subset by year. Pass None to get all years. Defaults to (2019,).
-        columns (Optional[Sequence[str]], optional): subset by column. Pass None to get all columns. Defaults to ( "plant_id_eia", "unitid", "operating_datetime_utc", "operating_time_hours", "gross_load_mw", "state", ).
-        engine (Optional[str], optional): choose 'pandas' or 'dask'. Defaults to 'pandas'
+        columns (Optional[Sequence[str]], optional): subset by column. Pass None to get all columns. Defaults to ( "plant_id_eia", "unitid", "operating_datetime_utc", "gross_load_mw", "unit_id_epa").
 
     Returns:
         pd.DataFrame: epacems data
     """
-    if engine == "pandas":
-        dataframe = pd
-    elif engine == "dask":
-        dataframe = dd
-    else:
-        raise ValueError(f"engine must be either 'pandas' or 'dask'. Given: {engine}")
-
     if states is None:
         states = pudl.constants.us_states.keys()  # all states
     else:
@@ -70,7 +60,7 @@ def load_epacems(
     cems_path = Path(pudl_settings["parquet_dir"]) / "epacems"
 
     try:
-        cems = dataframe.read_parquet(
+        cems = pd.read_parquet(
             cems_path,
             use_nullable_dtypes=True,
             columns=columns,
@@ -82,7 +72,7 @@ def load_epacems(
     # catch empty result
     except ValueError as e:
         if e.args[0] == "need at least one array to concatenate":
-            cems = dataframe.DataFrame(columns=columns)
+            cems = pd.DataFrame(columns=columns)
         else:
             raise e
 
